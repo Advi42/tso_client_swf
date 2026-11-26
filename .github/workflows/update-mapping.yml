@@ -1,0 +1,51 @@
+name: Update stage mapping
+
+# Replacement for the external "swf_updater". Pulls the official client SWF of a
+# stage, extracts FileHashing_Mapping + VERSION_NR into stage/<stage>/.
+# Configure repo Variables: LIVE_SWF_URL, TEST_SWF_URL (direct URL of official client SWF).
+
+on:
+  schedule:
+    - cron: '30 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [live, test]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Extract mapping
+        id: ex
+        env:
+          URL: ${{ matrix.stage == 'live' && vars.LIVE_SWF_URL || vars.TEST_SWF_URL }}
+        run: |
+          [ -n "$URL" ] || { echo "::warning::no SWF URL variable for ${{ matrix.stage }}"; exit 0; }
+          curl -fsSL --retry 3 -o official.swf "$URL"
+          python3 tools/extract_mapping.py official.swf new-${{ matrix.stage }}
+          echo "ok=1" >> "$GITHUB_OUTPUT"
+      - name: Commit if changed
+        if: steps.ex.outputs.ok == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          S=${{ matrix.stage }}
+          if cmp -s new-$S/mapping.data stage/$S/mapping.data && cmp -s new-$S/version.txt stage/$S/version.txt; then
+            echo "no change"; exit 0
+          fi
+          cp new-$S/mapping.data new-$S/version.txt stage/$S/
+          git config user.name swf_updater
+          git config user.email updater@users.noreply.github.com
+          git add stage/$S
+          git commit -m "AutoUpdate $S mapping $(cat stage/$S/version.txt)"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          # pushes made with GITHUB_TOKEN do not trigger build.yml
+          gh workflow run build.yml --ref "${GITHUB_REF_NAME}"
